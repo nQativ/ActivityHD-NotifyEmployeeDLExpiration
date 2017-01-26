@@ -1,0 +1,214 @@
+<XML ID="{4AE0010F-B62D-4A27-B137-74F578498072}" Type="Macros">
+	<data Code="Notify DL renewal needed" ID="{81FBAC85-B68D-44C0-B995-CE383083BC80}">
+		<Name Value="Notify DL renewal needed"/>
+		<Description Value="Notify employees they need to renew their Drivers License"/>
+		<MacroType Value="General"/>
+		<EnableResults Value="True"/>
+		<Shortcut/>
+		<RecordType/>
+		<RunFrom Value="Notes (Payroll)">
+			<item Code="Notes (Payroll)" ID="{B2B70B94-BF75-4C3F-8C11-C4F4AA6242FD}" Assigned="True"/>
+		</RunFrom>
+		<Using Value="Word_Tools">
+			<item Code="Word_Tools" ID="{2AD3AF07-4F1E-4BA3-8761-9BC2474F2F49}" Assigned="True"/>
+		</Using>
+		<MacroScript>'-Initialization
+'---------------
+dim word_object
+set word_object = CreateObject("Word.Application")
+
+'stop
+
+dim dictContent 
+set dictContent = CreateObject("Scripting.Dictionary")
+
+dim macro_data
+set macro_data = company.Administration.Macro
+macro_data.Locate "Notify DL renewal needed"
+dim tmp_word_file
+tmp_word_file = macro_data.Attachments.SaveAsTempFile("Employee_Notification_DL_Expiration.docx")
+'msgbox tmp_word_file
+
+dim fso
+set fso = CreateObject("Scripting.FileSystemObject")
+dim tmp_folder
+tmp_folder = fso.GetParentFolderName(tmp_word_file)
+
+dim CntNotificationsEmailed
+CntNotificationsEmailed = 0
+dim CntNotificationsPrinted
+CntNotificationsPrinted = 0
+
+
+'-Main Looping Script
+'--------------------
+dim note_data
+set note_data = company.Payroll.PRNote
+note_data.Navigator.Parameters = _
+    "&lt;p&gt;" &amp; _
+    "&lt;Filter Name='DL renewal needed by 28 days'/&gt;" &amp; _
+    "&lt;/p&gt;"
+
+note_data.Navigator.First
+while not note_data.Navigator.eof
+  
+    '-Validate Note Record
+    if (note_data.Fields("PRNoteType").Value &lt;&gt; "DL") then
+    Err.Raise vbObjectError, "MacroSource", "Skipping Note since Type is not 'DL' (Drivers License)."
+    end if
+    if IsNull(note_data.Fields("RecallDate").Value) then
+    Err.Raise vbObjectError, "MacroSource", "Skipping Note since Recall Date is blank."
+    end if
+
+    'RecordLoop.AddMessage "PREmployee GUID on this Note Record" + Note_data.Fields("PREmployee").ValueInternal
+
+    Dim employee_data 
+    Set employee_data = company.Payroll.PREmployee
+'Stop
+    dim employee_code 
+    employee_code = note_data.Fields("References/Employees").Value
+    employee_data.Locate employee_code
+    if (employee_data.Code &lt;&gt; employee_code) then
+        Err.Raise vbObjectError, "MacroSource", "Could not locate Employee: " &amp; employee_code
+    end if
+
+    dim MyNoteDate
+    MyNoteDate = note_data.Fields("NoteDate").Value
+    dim formatted_NoteDate
+    formatted_NoteDate = formatdatetime(MyNoteDate, 2)
+
+    dim MyRecallDate
+    MyRecallDate = note_data.Fields("RecallDate").Value    
+    dim formatted_RecallDate
+    formatted_RecallDate = formatdatetime(MyRecallDate, 2)
+
+    ' --- Collect Dictionary Content for Word document ---
+    with dictContent
+        dictContent.RemoveAll
+
+        ' -- Employee Information
+        .Add "ccEmployeeCode" , employee_data.Code
+        .Add "ccEmployeeName", employee_data.FirstNameFirst
+        .Add "ccEmployeeBirthDate", employee_data.BirthDate
+
+        ' -- Note Record Information
+        .Add "ccDLExpiration", formatted_NoteDate
+        .Add "ccDLRecallDate", formatted_RecallDate
+
+    end with
+
+    dim working_word_file
+    working_word_file = tmp_folder + "\Employee_Notification_DL_Expiration.docx"
+
+    fso.CopyFile tmp_word_file, working_word_file 
+
+    dim word_file
+    set word_file = fso.GetFile(working_word_file)
+    word_file.Attributes = word_file.Attributes xor 1
+
+    dim word_doc
+    set word_doc = word_object.Documents.Open(working_word_file)
+
+    Word_tools.ReplaceContentControls word_doc, dictContent
+
+    dim pdf_filename
+    pdf_filename = tmp_folder + "\Employee_Notification_DL_Expiration_" + dictContent("ccEmployeeCode") + ".pdf"
+    word_doc.ExportAsFixedFormat pdf_filename, 17
+    word_doc.Close False
+
+    if (fso.FileExists(pdf_filename)) then
+
+        sendToEmail = ""
+        if (employee_data.DistributionEmail = "H") then
+            sendToEmail = employee_data.HomeEmail
+        elseif (employee_data.DistributionEmail = "W") then
+            sendToEmail = employee_data.WorkEmail
+        end if
+
+        if (sendToEmail &lt;&gt; "") then
+    '-Email the pdf
+            'RecordLoop.AddMessage "Emailing " + pdf_filename
+            Set objEmail  = CreateObject("Outlook.Application")
+            Set EmailItem = objEmail.CreateItem(olMailItem)
+
+            With EmailItem
+                .To   = sendToEmail
+                .Subject = "Notification of Drivers License expiration"
+                .Body = "Please renew your Drivers licsence and present your new License to the Human Resources department so they can attach a photo copy of your new license to our records for you."
+                .Attachments.Add pdf_filename
+                .Send
+            End With
+            note_text = "Notification sent via Email to " &amp; sendToEmail &amp; " (see attached)"
+            CntNotificationsEmailed = CntNotificationsEmailed + 1
+        Else
+    '-Print the pdf
+            'RecordLoop.AddMessage "Printing " &amp; pdf_filename
+            CreateObject("Shell.Application").Namespace(0).ParseName(pdf_filename).InvokeVerbEx("Print")
+            note_text = "Notification sent via Print" &amp; " (see attached)"
+            CntNotificationsPrinted = CntNotificationsPrinted + 1
+        end if
+
+    '-Clear the Recall Date
+	note_data.Edit
+        note_data.Fields("RecallDate").Value = Null
+	note_data.Fields("NoteText").Value = note_data.Fields("NoteText").Value &amp; vbcrlf &amp; vbcrlf &amp; note_text
+        note_data.Save
+
+    '-Attach the pdf notification to the Note record
+        note_data.Fields("Attachments").Items.Add pdf_filename
+    end if
+
+note_data.Navigator.Next
+wend
+
+On Error Resume Next
+fso.DeleteFile working_word_file
+On Error Resume Next
+fso.DeleteFile pdf_filename
+
+
+'-Finalization
+'-------------
+'Stop
+Activity.SendEmail _
+ "&lt;Email ToAddress='pjohnston@nqativ.com' Subject='Results of Activity-Macro: Notify DL renewal needed'&gt;" &amp;_
+   "&lt;Body&gt;" &amp;_
+    "The Activity-Macro: 'Notify DL renewal needed' resulted in:" &amp; vbcrlf _
+    &amp; "   " &amp; CntNotificationsEmailed &amp; " notifications emailed" &amp; vbcrlf _
+    &amp; "   " &amp; CntNotificationsPrinted &amp; " notifications printed" &amp;_
+   "&lt;/Body&gt;" &amp;_
+ "&lt;/Email&gt;"
+
+'Set objEmail  = CreateObject("Outlook.Application")
+'Set EmailItem = objEmail.CreateItem(olMailItem)
+'Set Rcpt = objEmail.Session.CurrentUser
+'Set ExUser = Rcpt.AddressEntry.GetExchangeUser()
+'
+'With EmailItem
+'    .To   = ExUser.PrimarySMTPAddress
+'    .Subject = "Results of Activity-Macro: Notify DL renewal needed"
+'    .Body = "The Activity-Macro: 'Notify DL renewal needed' resulted in:" &amp; vbcrlf _
+'            &amp; "   " &amp; CntNotificationsEmailed &amp; " notifications emailed" &amp; vbcrlf _
+'            &amp; "   " &amp; CntNotificationsPrinted &amp; " notifications printed"
+'    .Send
+'End With
+
+set word_object = nothing</MacroScript>
+		<MacroScriptInit/>
+		<MacroScriptFinal/>
+		<AccessControl Value="All"/>
+		<Permissions Value="Testing - Phil">
+			<item Code="Testing - Phil" ID="{4D6B0D92-5026-4A63-B22A-0C8E7366D6C4}" Assigned="True"/>
+		</Permissions>
+		<Obsolete Value="False"/>
+		<Memo>Of the attachments on this Activity Macro:
+- Employee_Notification_DL_Expiration.docx
+  -- is the MS Word template document from which a pdf notification is createted
+- ActivityScript-NotifyEmployeesDLRenewal.vbs
+  -- is the Visual Basic Script file that can be submitted as a job in Task Scheduler run by cscript.exe</Memo>
+		<CreateDate Value="2016-10-07T15:06:29.070"/>
+		<CreateUser Value="pjohnston"/>
+		<ReviseDate Value="2017-01-11T09:00:37.483"/>
+		<ReviseUser Value="pjohnston"/>
+	</data>
+</XML>
